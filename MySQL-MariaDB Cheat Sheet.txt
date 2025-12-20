@@ -1,0 +1,461 @@
+curl -LsS https://downloads.mariadb.com/MariaDB/mariadb_repo_setup | sudo bash
+# chmod +x mariadb_repo_setup
+##Installation Steps:
+```
+1) download package from mariadb.com then extract and create repository
+	https://mariadb.com/downloads/
+	You may have to use a vpn to avoid blockage for restricted locations
+	tar -xvf ...
+2) rpm -ivh install common(+compat)
+3) rpm -ivh install client
+4) self:(rpm install galera + socat)
+5) rpm -ivh install server
+6) yum -y install MariaDB-backup-10.5.11*
+7-1)
+mkdir -p /var/log/mysql/
+chown -R mysql:mysql /var/log/mysql
+7-2) config the config file
+- add the following line to the server.cnf file under [mysqld]:
+	log_error=/var/log/mysql/mysqld.log
+- Uncomment the following line:
+	bind-address=0.0.0.0
+8) check owner
+-
+	chown -R mysql:mysql /var/log/mysql/
+	chown -R mysql:mysql /var/lib/mysql/
+
+9) grant permissions
+-
+	chmod 755
+	
+*) For changing the data folder:
+- create and copy to the destination
+	mkdir -p /data/mysql
+	mkdir -p /var/log/mysql/
+	chown -R mysql:mysql /data/mysql
+	rsync -av /var/lib/mysql/* /data/mysql
+	mv /var/lib/mysql /var/lib/mysql.bak
+	
+- add the following lines to the server.cnf file under [mysqld]
+datadir=/data/mysql/mysql
+socket=/data/mysql/mysql/mysql.sock
+	
+- add the following lines to client.cnf under [client]
+port=3306
+socket=/data/mysql/mysql/mysql.sock
+
+**) important! on CentOS7, you have to change config file permissions to 644
+chmod 644 /etc/my.cnf.d/*
+
+10) enable service
+
+11) start service
+
+12) check log file
+
+13) secure install #Important Note: this command must be executed prior to data directory relocation, otherwise it does not work.
+	mysql_secure_installation
+	
+14,15) drop unwanted users and 'test' database, and 15) grant login from all remote addresses to root user,
+	, create root user from % hosts, then disallow 'root' login locally without password
+mysql -e 'drop USER ""@localhost'
+mysql -e 'drop USER ""@<hostname>' 		# replace <hostname> with your hostname
+mysql -e 'drop database test'
+
+# 15:
+#: begin create a superuser	
+mysql -e "CREATE OR REPLACE USER root IDENTIFIED BY '1';"
+mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root' WITH GRANT OPTION;"
+mysql -e "alter user root password expire never;"
+#: end create a superuser
+mysql -e 'ALTER USER root@localhost IDENTIFIED VIA mysql_native_password USING PASSWORD("1")'
+	
+16)	open firewall port for incoming connections on tcp/3306:
+
+firewall-cmd --permanent --add-port=3306/tcp
+
+```
+----------------------------------------------------------------
+
+sudo yum search mariadb
+sudo yum info mariadb
+sudo yum install mariadb-server
+sudo systemctl enable mariadb.service
+sudo systemctl start mariadb.service
+sudo systemctl status mariadb.service
+sudo mysql_secure_installation
+mysql -u root -p -e "sql script"
+
+CREATE DATABASE MyDB;
+
+
+
+CREATE OR REPLACE USER 'a.momen' IDENTIFIED BY '1';
+ALTER USER 'a.momen' PASSWORD EXPIRE NEVER; -- since mdb 10.4.3
+DROP USER ''@'localhost';
+
+GRANT ALL PRIVILEGES ON database.table TO 'a.momen'@'%' [IDENTIFIED BY 'password'] WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+
+ALTER USER root@localhost IDENTIFIED VIA mysql_native_password USING PASSWORD("verysecret");
+require password entry for "mysql -u root"
+
+SHOW VARIABLES;
+mysql --verbose --help
+
+mysql --verbose --help
+show config files
+
+select @@datadir;
+
+SELECT User, Host FROM mysql.user WHERE Host <> 'localhost';
+list users that are able to connect to MariaDB remotely
+
+SELECT User FROM mysql.user;
+
+DESC object_name;
+show structure of the object_name
+
+show create ...;
+show the statement for creating the object;
+
+```
+#Setup GTID replication with readonly slave:
+1) create backup and binary logs directories
+- backup directory:
+/data/mysql/backups/full-backup1/
+
+2) in Master, add the following lines to config file under [MariaDB]
+log-bin=/data/mysql/mysql/MyDB/log-bin
+server_id=1
+log-basename=master1
+binlog-format=mixed
+gtid_strict_mode=1
+gtid_domain_id=<Last character in the hostname> 	#voluntary
+	
+3) in Slave, add the following lines to config file under [MariaDB]
+server_id=2
+gtid_strict_mode=1
+read_only = 1
+gtid_domain_id=<Last character in the hostname>
+	
+4) in Master, create a replication user (RELOAD and PROCESS permissions are required for backup)
+CREATE USER 'repl' IDENTIFIED BY '1';
+-- default host is localhost if @'host' is not specified.
+-- To specify or change the host after the user has been created, you can use the RENAME USER statement
+RENAME USER 'super'@'localhost' TO 'super'@'%';
+
+GRANT RELOAD, PROCESS, SUPER, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl';
+GRANT ALL PRIVILEGES ON *.* TO 'super'@'%' IDENTIFIED BY '111036am;';
+FLUSH PRIVILEGES;
+
+select user,host from mysql.user \G
+-- \G will use the expanded result set mode
+
+5) in both Master and Slave, install qpress if not installed for compression/decompression
+yum install https://repo.percona.com/yum/percona-release-latest.noarch.rpm -y
+yum install qpress -y
+
+6) in Master, Take a full backup of your database in linux cli (--parallel is DOP)
+mkdir -p /data/mysql/backups/full-backup1
+chown -R mysql:mysql /data/mysql
+mariabackup --defaults-file=/etc/my.cnf --backup --compress \
+--target-dir=/data/mysql/backups/full-backup1 --user=repl \
+--password=1 --backup --compress --parallel=4
+
+7) in slave, create the following directory to copy the master's backup to:
+mkdir -p /data/mysql/backups_slave/rep
+
+
+8) in master, copy the master's backup to that directory:
+scp -rp /data/mysql/backups/full-backup1 root@192.168.241.185:/data/mysql/backups_slave/rep/full-backup1 # or use rsync -a
+
+9),10),11),12),13),14)
+	9) in slave, decompress the backup image and prepare it, then stop MariaDB service:
+	10) in slave, remove all files in the data directory (/data/mysql/mysql/*)
+	11)In slave, Remove any .qp files in target directory if there are any:
+	12) now in slave, move the decompressed backup to the main place to form a clone of the master:
+	13) in slave, make sure that mysql owns the mariadb home directory
+	14) in slave start the MariaDB service
+
+#9
+mariabackup --decompress --parallel=4 --remove-original \
+--target-dir=/data/mysql/backups_slave/rep/full-backup1
+mariabackup --prepare --target-dir=/data/mysql/backups_slave/rep/full-backup1
+systemctl stop mariadb
+#10
+rm -rf /data/mysql/mysql/*
+#11
+cd /data/mysql/backups_slave/rep/full-backup1
+find . -type f -name "*.qp" -exec rm -v {} \;
+#12
+mv /data/mysql/backups_slave/rep/full-backup1/* /data/mysql/
+rm -rf /data/mysql/backups_slave/rep/*
+#13
+chown -R mysql:mysql /data/mysql
+#14
+systemctl start mariadb
+
+
+15) get GTID using one of two following approaches: (take note of it)
+	a) in master run the following command in mariadb client:
+	mysql -uroot -p1 -e "SELECT @@GLOBAL.gtid_binlog_pos"
+	mysql -uroot -p1 -e "SELECT @@GLOBAL.gtid_current_pos"
+
+	b) in slave, Get GTID in linux cli
+	cat /data/mysql/mysql/xtrabackup_info | grep -i GTID
+	My last result:
+	binlog_pos = filename 'master1-bin.000003', position '344', GTID of the last change '0-1-1'
+
+16) in slave, run the following commands inside mysql client:
+stop slave; reset slave; reset slave all; reset master;
+set global gtid_slave_pos='0-1-933';
+----------------------------------
+CHANGE MASTER TO
+master_host='192.168.241.181', 
+master_port=3306, 
+master_user='repl', 
+master_password='1', 
+master_connect_retry=10, 
+
+master_use_gtid=slave_pos;
+--------------------------------- make slave readonly
+set GLOBAL read_only=on
+--------------------------------- start slave
+Start Slave;
+--------------------------------- check slave status:
+show slave status \G
+--------------------------------- check if slave is read-only:
+SHOW VARIABLES WHERE variable_name = 'read_only';
+
+```
+
+SHOW MASTER STATUS
+to see bin log file and position run
+
+set password = password("your_password");
+
+
+
+select @@hostname;
+show variables where Variable_name like '%host%';
+
+select host from information_schema.processlist;
+
+
+
+
+SHOW GLOBAL VARIABLES WHERE variable_name LIKE 'thread_handling'
+SHOW GLOBAL VARIABLES LIKE 'innodb_file'
+SHOW ENGINES
+set GLOBAL performance_schema=1
+
+SELECT * FROM performance_schema.accounts
+
+mysql -u root -p databasename < file.sql
+when the database already exists
+
+inside mysql console:
+source /root/data/mysqlsampledatabase.sql
+when the database does not exist and is to be created by the script
+
+
+mysqlbinlogpurge --master=root:msandbox@localhost:45007 --slaves=root:msandbox@localhost:45008,root:msandbox@localhost:45009 --dry-run
+
+mysqlbinlogpurge --master=root:1@192.168.241.181:3306 --slaves=root:1@192.168.241.182:3306,root:1@192.168.241.183:3306 --dry-run
+mysqlbinlogpurge --server=root:1@192.168.241.182:3306 --dry-run
+mysqlbinlogpurge --master=root:1@192.168.241.181:3306 --slaves=root:1@192.168.241.185:3306 --dry-run
+mysqlbinlogpurge --server=root:1@192.168.241.182:3306 --binlog=mysql-bin.000002 --dry-run
+# Latest binlog file replicated by all slaves: mysql-bin.000011
+# To manually purge purge the binary logs Execute the following query:
+PURGE BINARY LOGS TO 'mysql-bin.000012'
+
+
+
+
+## inpatient charges:
+```
+CREATE TABLE inpatientCharges (
+  drg_definition VARCHAR(200),
+  provider_id INT,
+  provider_name VARCHAR(200),
+  provider_street_address VARCHAR(200),
+  provider_city VARCHAR(50),
+  provider_state VARCHAR(10),
+  provider_zip_code INT,
+  hospital_referral_region_description VARCHAR(50),
+  total_discharges INT,
+  average_covered_charges VARCHAR(20),
+  average_total_payments VARCHAR(20),
+  average_medicare_payments VARCHAR(20)
+);
+
+--oltp workload:
+use test;
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+insert into inpatientCharges values ('a',1,'a','a','a','a',1,'a',1,'a','a','a');
+
+select count(*) from inpatientCharges;
+
+mysqlimport -u root -p --fields-terminated-by=, --lines-terminated-by='\n' --replace --low-priority --fields-optionally-enclosed-by='"' --ignore-lines=1 --verbose test /data/mysql/inpatient_hospital_charges.csv
+
+```
+
+PURGE BINARY LOGS BEFORE (date(now()) + interval 0 second - interval 2 day);
+
+### create DB/USER for fanap:
+```
+1.	create database database_name character set utf8 collate utf8_general_ci;
+2.	create user 'user_name@'IP' identified by 'password';
+Important: The IP that the service owner specifies goes here.
+3.	grant all privileges on dbname.* to 'username'@'IP' identified by 'password';
+4.	 FLUSH PRIVILEGES;
+```
+
+
+
+### Sample mysql check
+```
+Ali@ALI-PCMAIN e:\Program_Files\xampp
+# mysqlcheck -uroot --all-databases --check
+mysql.column_stats                                 OK
+mysql.columns_priv                                 OK
+mysql.db
+error    : Page 0:  Got error: 176 when reading datafile
+error    : Corrupt
+mysql.event                                        OK
+mysql.func                                         OK
+mysql.global_priv                                  OK
+mysql.gtid_slave_pos                               OK
+mysql.help_category                                OK
+mysql.help_keyword                                 OK
+mysql.help_relation                                OK
+mysql.help_topic                                   OK
+mysql.index_stats                                  OK
+mysql.innodb_index_stats                           OK
+mysql.innodb_table_stats                           OK
+mysql.plugin                                       OK
+mysql.proc                                         OK
+mysql.procs_priv                                   OK
+mysql.proxies_priv
+error    : Page at 16384 is not marked for index 1
+error    : Keyblock size at page 16384 is not correct. Block length: 0  key length: 17
+error    : Corrupt
+mysql.roles_mapping                                OK
+mysql.servers                                      OK
+mysql.table_stats                                  OK
+mysql.tables_priv                                  OK
+mysql.time_zone                                    OK
+mysql.time_zone_leap_second                        OK
+mysql.time_zone_name                               OK
+mysql.time_zone_transition                         OK
+mysql.time_zone_transition_type                    OK
+mysql.transaction_registry                         OK
+phpmyadmin.pma__bookmark                           OK
+phpmyadmin.pma__central_columns                    OK
+phpmyadmin.pma__column_info                        OK
+phpmyadmin.pma__designer_settings                  OK
+phpmyadmin.pma__export_templates                   OK
+phpmyadmin.pma__favorite                           OK
+phpmyadmin.pma__history                            OK
+phpmyadmin.pma__navigationhiding                   OK
+phpmyadmin.pma__pdf_pages                          OK
+phpmyadmin.pma__recent                             OK
+phpmyadmin.pma__relation                           OK
+phpmyadmin.pma__savedsearches                      OK
+phpmyadmin.pma__table_coords                       OK
+phpmyadmin.pma__table_info                         OK
+phpmyadmin.pma__table_uiprefs                      OK
+phpmyadmin.pma__tracking                           OK
+phpmyadmin.pma__userconfig                         OK
+phpmyadmin.pma__usergroups                         OK
+phpmyadmin.pma__users                              OK
+-----------------------------------------------------------
+Ali@ALI-PCMAIN e:\Program_Files\xampp
+# mysqlcheck -uroot --all-databases --repair
+mysql.column_stats                                 OK
+mysql.columns_priv
+error    : aria_sort_buffer_size is too small. Current aria_sort_buffer_size: 16384  rows: 234  sort_length: 1006
+error    : Create index by sort failed
+info     : Retrying repair with keycache
+status   : OK
+mysql.db
+info     : Wrong CRC on datapage at 1
+warning  : Number of rows changed from 3 to 0
+status   : OK
+mysql.event                                        OK
+mysql.func                                         OK
+mysql.global_priv                                  OK
+mysql.gtid_slave_pos
+note     : The storage engine for the table doesn't support repair
+mysql.help_category                                OK
+mysql.help_keyword                                 OK
+mysql.help_relation                                OK
+mysql.help_topic                                   OK
+mysql.index_stats                                  OK
+mysql.innodb_index_stats
+note     : The storage engine for the table doesn't support repair
+mysql.innodb_table_stats
+note     : The storage engine for the table doesn't support repair
+mysql.plugin                                       OK
+mysql.proc                                         OK
+mysql.procs_priv                                   OK
+mysql.proxies_priv                                 OK
+mysql.roles_mapping                                OK
+mysql.servers                                      OK
+mysql.table_stats                                  OK
+mysql.tables_priv                                  OK
+mysql.time_zone                                    OK
+mysql.time_zone_leap_second                        OK
+mysql.time_zone_name                               OK
+mysql.time_zone_transition                         OK
+mysql.time_zone_transition_type                    OK
+mysql.transaction_registry
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__bookmark
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__central_columns
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__column_info
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__designer_settings
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__export_templates
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__favorite
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__history
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__navigationhiding
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__pdf_pages
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__recent
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__relation
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__savedsearches
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__table_coords
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__table_info
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__table_uiprefs
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__tracking
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__userconfig
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__usergroups
+note     : The storage engine for the table doesn't support repair
+phpmyadmin.pma__users
+note     : The storage engine for the table doesn't support repair
+```
